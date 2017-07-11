@@ -1,0 +1,7 @@
+[package]
+name = "serial_example"
+version = "0.1.0"
+authors = ["Michal Podhradsky <michal.podhradsky@aggiemail.usu.edu>"]
+
+[dependencies]
+serial="0.4"
