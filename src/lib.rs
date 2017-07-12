@@ -14,6 +14,16 @@ const VN_GROUP_FIELD_2: u16 = 0x061A;
 const VN_GROUP_FIELD_3: u16 = 0x0140;
 const VN_GROUP_FIELD_4: u16 = 0x0009;
 
+#[allow(dead_code)]
+const VN_GROUP_LENGTH: [[u8;16];6] = [
+		[8, 8, 8, 12, 16, 12, 24, 12, 12, 24, 20, 28, 2, 4, 8, 0], // Group 1
+		[8, 8, 8, 2, 8, 8, 8, 4, 0, 0, 0, 0, 0, 0, 0, 0], // Group 2
+		[2, 12, 12, 12, 4, 4, 16, 12, 12, 12, 12, 2, 40, 0, 0, 0], // Group 3
+		[8, 8, 2, 1, 1, 24, 24, 12, 12, 12, 4, 4, 32, 0, 0, 0], // Group 4
+		[2, 12, 16, 36, 12, 12, 12, 12, 12, 12, 28, 24, 0, 0, 0, 0], // Group 5
+		[2, 24, 24, 12, 12, 12, 12, 12, 12, 4, 4,68, 64, 0, 0, 0], // Group 6
+		];
+
 #[repr(C,packed)]
 #[derive(Debug)]
 pub struct VectornavData {
@@ -214,6 +224,8 @@ impl VNPacket {
 				VNMsgStatus::VNMsgGroup => {
 					self.buf.push(byte);
 					if self.buf.len() as u8 == VN_GROUP_BYTES {
+						// calculate payload size
+						
 						self.status = VNMsgStatus::VNMsgData;
 					}
 				},

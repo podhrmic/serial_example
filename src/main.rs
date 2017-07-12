@@ -134,5 +134,6 @@ fn main() {
 	
 	
 	t1.join().expect("Error waiting for t1 to finish");
-	t2.join().expect("Error waiting for t2 to finish");	
+	t2.join().expect("Error waiting for t2 to finish");
+	
 }
