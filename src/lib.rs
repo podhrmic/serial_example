@@ -5,7 +5,6 @@ use std::mem;
 
 const VN_SYNC: u8 = 0xFA;
 const VN_OUTPUT_GROUP: u8 = 0x39;
-const VN_GROUP_BYTES: u8 = 8;
 const VN_HEADER_SIZE: u8 = 10;
 const VN_PAYLOAD_SIZE: u8 = 144;
 const VN_CRC_SIZE: u8 = 2;
@@ -14,6 +13,11 @@ const VN_GROUP_FIELD_2: u16 = 0x061A;
 const VN_GROUP_FIELD_3: u16 = 0x0140;
 const VN_GROUP_FIELD_4: u16 = 0x0009;
 
+// note that dynamic payload length determination is potentially dangerous, 
+// because we can overflow a buffer with long packet and we would have to be careful
+// to use u16 or usize instead of u8 for lenght description.
+// 
+// Here is serves only as an example how to leverage Rust's feature. 
 #[allow(dead_code)]
 const VN_GROUP_LENGTH: [[u8;16];6] = [
 		[8, 8, 8, 12, 16, 12, 24, 12, 12, 24, 20, 28, 2, 4, 8, 0], // Group 1
@@ -129,6 +133,11 @@ pub struct VNPacket {
 	pub vn_data: VectornavData,
 	idx: u8,
 	pub buf: Vec<u8>,
+	groups: Vec<u8>,
+	group_bytes: Vec<u8>, 
+	payload_len: u8, // assume stricly less than 255 payload bytes
+	header_len: u8,
+	
 }
 
 impl VNPacket {
@@ -144,6 +153,10 @@ impl VNPacket {
 			vn_data: VectornavData::new(),
 			idx: 0,
 			buf: vec![],
+			groups: vec![],
+			group_bytes: vec![],
+			payload_len: 0,
+			header_len: 0,
 		}
 	}
 	
@@ -170,6 +183,7 @@ impl VNPacket {
 	pub fn fill_crc(&mut self) {
 		// push crc to buffer
 		let (crc0,crc1) = self.calculate_crc();
+		self.calc_chk = (crc0 as u16) << 8 | crc1 as u16;
 		self.buf.push(crc0);
 		self.buf.push(crc1);
 	}
@@ -187,13 +201,13 @@ impl VNPacket {
 		// pop received crc first
 		let crc1 = self.buf.pop().unwrap();
 		let crc0 = self.buf.pop().unwrap();
-		let rec_crc = (crc0 as u16) << 8 | crc1 as u16;
+		self.rec_chk = (crc0 as u16) << 8 | crc1 as u16;
 		
 		// calculate crc
 		let (crc0, crc1) = self.calculate_crc();
-		let calc_crc = (crc0 as u16) << 8 | crc1 as u16;
+		self.calc_chk = (crc0 as u16) << 8 | crc1 as u16;
 		
-		if calc_crc == rec_crc {
+		if self.calc_chk == self.rec_chk {
 			true
 		} else {
 			false
@@ -204,6 +218,8 @@ impl VNPacket {
 		for &byte in data {
 			match self.status {
 				VNMsgStatus::VNMsgSync => {
+					self.buf = vec![]; // erase buffer ( so we don't forget about it(
+					
 					if byte == VN_SYNC {
 						self.buf.push(byte);
 						self.status = VNMsgStatus::VNMsgHeader;
@@ -212,34 +228,31 @@ impl VNPacket {
 					}
 				},
 				VNMsgStatus::VNMsgHeader => {
-					if byte == VN_OUTPUT_GROUP {
-						self.status = VNMsgStatus::VNMsgGroup;
-						self.buf.push(byte);
-						
-					} else {
-						self.hdr_err += 1;
-						self.status = VNMsgStatus::VNMsgSync;
-					}
+					self.status = VNMsgStatus::VNMsgGroup;
+					self.buf.push(byte);
+					self.groups = get_groups(byte);
+					self.header_len = self.groups.len() as u8 * 2 + 2u8;
 				},
 				VNMsgStatus::VNMsgGroup => {
 					self.buf.push(byte);
-					if self.buf.len() as u8 == VN_GROUP_BYTES {
+					self.group_bytes.push(byte);
+					if self.buf.len() == self.header_len as usize {
 						// calculate payload size
+						self.payload_len = get_payload_length(&self.groups, &mut self.group_bytes);
 						
+						// assert that we have the correct payload length for out applicaiton
+						// TODO: detect different packet structures
+						assert_eq!(self.payload_len,144);
 						self.status = VNMsgStatus::VNMsgData;
 					}
 				},
 				VNMsgStatus::VNMsgData => {
 					self.buf.push(byte);
-					if self.buf.len() as u8 == (VN_PAYLOAD_SIZE + VN_HEADER_SIZE + VN_CRC_SIZE) {
+					if self.buf.len() as u8 == (self.payload_len + self.header_len + VN_CRC_SIZE) {
 						if self.verify_checksum() {
 							self.msg_available = true;
-							self.counter += 1;
-							
+							self.counter += 1;							
 						    self.vn_data = VectornavData::from_slice(&self.buf); // create the struct			    						    
-							self.buf = vec![]; // erase buffer
-							
-							
 						} else {
 							self.msg_available = false;
 							self.chksm_err += 1;
@@ -248,7 +261,7 @@ impl VNPacket {
 					}
 				},
 			}
-		}
+		}		
 	}
 	
 	
@@ -266,5 +279,83 @@ impl VNPacket {
 		}
 		
 		((crc >> 8) as u8, crc as u8)
+	}
+}
+
+fn get_groups(group: u8) -> Vec<u8> {
+	let mut groups: Vec<u8> = vec![];
+		for idx in 0..7 {
+			if ((group >> idx) & 0x1) == 1u8 {
+				groups.push(idx);
+			}
+		}
+	groups		
+}
+
+fn get_payload_length(groups: &Vec<u8>, group_bytes: &mut Vec<u8>) -> u8 {
+		let mut payload_len = 0;
+
+		// for each group
+		for &group_number in groups {
+			let mut group_fields: u16 = group_bytes.remove(0) as u16;
+			group_fields = group_fields << 8 | group_bytes.remove(0) as u16; 
+
+			for idx in 0..15 {
+				if ((group_fields >> idx) & 0x1) == 1 {
+					let val = VN_GROUP_LENGTH[group_number as usize][idx as usize];
+					payload_len = payload_len + val; 
+				}
+			}
+		}
+		
+		payload_len
+}
+
+
+// lets practice with some tests
+#[cfg(test)]
+mod tests {
+	use super::*;
+	
+	#[test]
+	fn checksum() {
+		// prepare sending packet
+		let mut tx = VNPacket::new();
+		tx.fill_header();
+		tx.fill_data();
+		tx.fill_crc();
+		
+		// prepare receiver
+		let mut rx = VNPacket::new();
+		rx.vn_data = VectornavData::clean(); // clean data
+		
+		// copy data
+		rx.parse_data(&tx.buf);
+		
+		assert_eq!(tx.calc_chk,rx.calc_chk);
+	}
+
+	#[test]
+	fn groups() {
+		// get output group 
+		let groups = get_groups(VN_OUTPUT_GROUP);
+		
+		let mut group_bytes: Vec<u8> = vec![
+				((VN_GROUP_FIELD_1 >> 8) as u8),
+				((VN_GROUP_FIELD_1) as u8),
+				((VN_GROUP_FIELD_2 >> 8) as u8),
+				((VN_GROUP_FIELD_2) as u8),
+				((VN_GROUP_FIELD_3 >> 8) as u8),
+				((VN_GROUP_FIELD_3) as u8),
+				((VN_GROUP_FIELD_4 >> 8) as u8),
+				((VN_GROUP_FIELD_4) as u8),
+			];
+		//group_bytes.reverse();
+		println!("Gruop bytes: {:?}",group_bytes);
+		
+		let payload_len = get_payload_length(&groups, &mut group_bytes);
+		
+		println!("Payload len = {}", payload_len);
+		assert_eq!(payload_len,144);		
 	}
 }
